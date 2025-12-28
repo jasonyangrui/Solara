@@ -1,90 +1,71 @@
-const API_BASE_URL = "https://music-api.gdstudio.xyz/api.php";
-const SAFE_RESPONSE_HEADERS = [
-  "content-type",
-  "cache-control",
-  "accept-ranges",
-  "content-length",
-  "content-range",
-  "etag",
-  "last-modified",
-  "expires",
-];
+const SAFE_HEADERS = ["content-type","cache-control","accept-ranges","content-length","etag"];
 
-function createCorsHeaders(init?: Headers): Headers {
+function createCorsHeaders(init?: Headers) {
   const headers = new Headers();
   if (init) {
-    for (const [key, value] of init.entries()) {
-      if (SAFE_RESPONSE_HEADERS.includes(key.toLowerCase())) {
-        headers.set(key, value);
-      }
+    for (const [k,v] of init.entries()) {
+      if (SAFE_HEADERS.includes(k.toLowerCase())) headers.set(k,v);
     }
   }
-  if (!headers.has("Cache-Control")) headers.set("Cache-Control", "no-store");
-  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Origin","*");
   return headers;
 }
 
-function handleOptions(): Response {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,HEAD,OPTIONS",
-      "Access-Control-Allow-Headers": "*",
-      "Access-Control-Max-Age": "86400",
-    },
-  });
+async function searchNetease(name: string) {
+  const url = `https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(name)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return { source: "netease", songs: data.result?.songs || [] };
 }
 
-async function proxyApiRequest(url: URL, request: Request, source: string): Promise<Response> {
-  const apiUrl = new URL(API_BASE_URL);
-  url.searchParams.forEach((value, key) => {
-    if (key === "target" || key === "callback") return;
-    apiUrl.searchParams.set(key, value);
+async function searchQQ(name: string) {
+  const url = `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=20&w=${encodeURIComponent(name)}`;
+  const res = await fetch(url, {
+    headers: { "User-Agent":"Mozilla/5.0" }
   });
-
-  // 指定来源：netease / qq / kuwo
-  apiUrl.searchParams.set("source", source);
-
-  if (!apiUrl.searchParams.has("types")) {
-    return new Response("Missing types", { status: 400 });
-  }
-
-  const upstream = await fetch(apiUrl.toString(), {
-    headers: {
-      "User-Agent": request.headers.get("User-Agent") ?? "Mozilla/5.0",
-      "Accept": "application/json",
-    },
-  });
-
-  const headers = createCorsHeaders(upstream.headers);
-  if (!headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json; charset=utf-8");
-  }
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers,
-  });
+  const data = await res.json();
+  // 数据处理成统一格式
+  const songs = (data?.data?.song?.list || []).map((item: any) => ({
+    id: item.songid,
+    name: item.songname,
+    artist: item.singer.map((s:any)=>s.name).join(","),
+    url: "", // 需要单独解码获取播放链接
+    pic: "",
+    lyric: ""
+  }));
+  return { source: "qq", songs };
 }
 
-export async function onRequest({ request }: { request: Request }): Promise<Response> {
-  if (request.method === "OPTIONS") return handleOptions();
-  if (request.method !== "GET" && request.method !== "HEAD")
-    return new Response("Method not allowed", { status: 405 });
+async function searchKuwo(name: string) {
+  const url = `http://www.kuwo.cn/api/www/search/searchMusic?key=${encodeURIComponent(name)}`;
+  const res = await fetch(url, {
+    headers: { "User-Agent":"Mozilla/5.0" }
+  });
+  const data = await res.json();
+  const songs = (data?.data?.list || []).map((item:any)=>({
+    id: item.MusicId,
+    name: item.MusicName,
+    artist: item.Artist,
+    url: "",
+    pic: item.AlbumPic,
+    lyric: ""
+  }));
+  return { source: "kuwo", songs };
+}
 
+export async function onRequest({ request }: { request: Request }) {
   const url = new URL(request.url);
-  const platform = url.searchParams.get("platform") || "netease"; // 默认网易云
+  const platform = (url.searchParams.get("platform") || "netease").toLowerCase();
+  const name = url.searchParams.get("name") || "";
+  if(!name) return new Response("Missing 'name' parameter", { status: 400 });
 
-  // 只允许三种平台
-  const sourceMap: Record<string, string> = {
-    netease: "netease",
-    qq: "qq",
-    kuwo: "kuwo",
-  };
-  const source = sourceMap[platform.toLowerCase()];
-  if (!source) return new Response("Invalid platform", { status: 400 });
+  let result;
+  if(platform==="netease") result = await searchNetease(name);
+  else if(platform==="qq") result = await searchQQ(name);
+  else if(platform==="kuwo") result = await searchKuwo(name);
+  else return new Response("Invalid platform", {status:400});
 
-  return proxyApiRequest(url, request, source);
+  return new Response(JSON.stringify(result), {
+    headers: createCorsHeaders()
+  });
 }
